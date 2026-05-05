@@ -26,9 +26,11 @@ interface UseSessionReturn {
   greeting: boolean;
   ending: boolean;
   greeted: boolean;
+  changingTutor: boolean;
   error: string | null;
   handleSend: (content: string) => Promise<void>;
   handleEndSession: () => Promise<void>;
+  handleChangeTutor: (personaId: string) => Promise<void>;
   setError: (e: string | null) => void;
 }
 
@@ -40,6 +42,7 @@ export function useSession(sessionId: string): UseSessionReturn {
   const [greeted, setGreeted] = useState(false);
   const [greeting, setGreeting] = useState(false);
   const [ending, setEnding] = useState(false);
+  const [changingTutor, setChangingTutor] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const greetCalledRef = useRef(false);
@@ -173,6 +176,70 @@ export function useSession(sessionId: string): UseSessionReturn {
     }
   }, [sending, sessionId]);
 
+  // ── Change tutor mid-session ─────────────────────────────────────────────
+  const handleChangeTutor = useCallback(async (personaId: string) => {
+    if (changingTutor || meta?.phase === 'ended') return;
+    setChangingTutor(true);
+    try {
+      // 1. Switch persona in DB
+      const res = await fetch(`/api/sessions/${sessionId}/persona`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ personaId }),
+      });
+      if (!res.ok) {
+        const data = await res.json() as { error?: string };
+        throw new Error(data.error ?? 'Failed to change tutor');
+      }
+      const result = await res.json() as { personaName: string };
+      setMeta((prev) => prev ? { ...prev, personaName: result.personaName } : prev);
+
+      // 2. Insert divider notification
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `switch-${Date.now()}`,
+          role: 'assistant' as const,
+          content: `— Tutor switched to ${result.personaName} —`,
+          streaming: false,
+        },
+      ]);
+
+      // 3. Stream handoff greeting from new tutor
+      const asstMsgId = `handoff-${Date.now()}`;
+      setMessages((prev) => [
+        ...prev,
+        { id: asstMsgId, role: 'assistant' as const, content: '', streaming: true },
+      ]);
+
+      const handoffRes = await fetch(`/api/sessions/${sessionId}/handoff`, { method: 'POST' });
+      if (!handoffRes.ok || !handoffRes.body) {
+        setMessages((prev) => prev.filter((m) => m.id !== asstMsgId));
+      } else {
+        const reader = handoffRes.body.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === asstMsgId
+                ? { ...m, content: m.content + decoder.decode(value, { stream: true }) }
+                : m,
+            ),
+          );
+        }
+        setMessages((prev) =>
+          prev.map((m) => (m.id === asstMsgId ? { ...m, streaming: false } : m)),
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change tutor');
+    } finally {
+      setChangingTutor(false);
+    }
+  }, [changingTutor, meta, sessionId]);
+
   // ── End session ───────────────────────────────────────────────────────────
   const handleEndSession = useCallback(async () => {
     if (ending || meta?.phase === 'ended') return;
@@ -187,5 +254,5 @@ export function useSession(sessionId: string): UseSessionReturn {
     }
   }, [ending, meta, sessionId]);
 
-  return { meta, messages, sending, greeting, ending, greeted, error, handleSend, handleEndSession, setError };
+  return { meta, messages, sending, greeting, ending, changingTutor, greeted, error, handleSend, handleEndSession, handleChangeTutor, setError };
 }

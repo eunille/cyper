@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { MessageBubble } from '@/components/MessageBubble';
 import { PhaseIndicator } from '@/components/PhaseIndicator';
@@ -12,19 +12,50 @@ import { useSession } from '@/hooks/useSession';
 const READY_REPLIES = ["Yes, I'm ready!", "Let's go!", 'Tell me more first'] as const;
 const CHAT_REPLIES = ["I'm stuck", 'Explain more', 'Give me a hint'] as const;
 
+interface Persona {
+  persona_id: string;
+  name: string;
+  role: string;
+  specialization: string;
+}
+
 export default function SessionPage() {
   const params = useParams<{ id: string }>();
   const sessionId = params.id;
-  const { meta, messages, sending, greeting, ending, greeted, error, handleSend, handleEndSession, setError } = useSession(sessionId);
+  const { meta, messages, sending, greeting, ending, changingTutor, greeted, error, handleSend, handleEndSession, handleChangeTutor, setError } = useSession(sessionId);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const [showTutorModal, setShowTutorModal] = useState(false);
+  const [personas, setPersonas] = useState<Persona[]>([]);
+  const [loadingPersonas, setLoadingPersonas] = useState(false);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const openTutorModal = useCallback(async () => {
+    setShowTutorModal(true);
+    if (personas.length > 0) return;
+    setLoadingPersonas(true);
+    try {
+      const res = await fetch('/api/personas');
+      if (res.ok) {
+        const data = await res.json() as { personas: Persona[] };
+        setPersonas(data.personas);
+      }
+    } finally {
+      setLoadingPersonas(false);
+    }
+  }, [personas.length]);
+
+  const selectTutor = useCallback(async (p: Persona) => {
+    setShowTutorModal(false);
+    await handleChangeTutor(p.persona_id);
+  }, [handleChangeTutor]);
+
   if (!meta) return <PageSpinner />;
 
-  const isDisabled = sending || greeting || meta.phase === 'ended';
+  const isDisabled = sending || greeting || changingTutor || meta.phase === 'ended';
   const activeQuickReplies = !greeted || messages.length <= 2 ? READY_REPLIES : CHAT_REPLIES;
 
   return (
@@ -47,6 +78,16 @@ export default function SessionPage() {
             </div>
 
             <div className="flex items-center gap-2">
+              {meta.phase !== 'ended' && (
+                <button
+                  type="button"
+                  disabled={changingTutor}
+                  onClick={openTutorModal}
+                  className="rounded-lg border border-neutral-200 px-3 py-1.5 text-xs font-medium text-neutral-500 transition-colors hover:bg-neutral-50 disabled:opacity-40"
+                >
+                  {changingTutor ? 'Switching…' : 'Change tutor'}
+                </button>
+              )}
               {meta.phase === 'ended' ? (
                 <span className="rounded-full border border-neutral-900 px-3 py-1 text-xs font-semibold text-neutral-900">
                   Complete
@@ -102,6 +143,7 @@ export default function SessionPage() {
                 role={m.role}
                 content={m.content}
                 streaming={m.streaming}
+                isSystemNote={m.id.startsWith('switch-')}
               />
             ))}
           </div>
@@ -139,11 +181,77 @@ export default function SessionPage() {
               onSend={handleSend}
               disabled={isDisabled}
               quickReplies={activeQuickReplies}
-              placeholder={greeting ? 'Your tutor is thinking…' : 'Message your tutor…'}
+              placeholder={greeting ? 'Your tutor is thinking…' : changingTutor ? 'Switching tutor…' : 'Message your tutor…'}
             />
           )}
         </div>
       </div>
+
+      {/* ── Change Tutor Modal ─────────────────────────────────────────────── */}
+      {showTutorModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4"
+          onClick={() => setShowTutorModal(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-neutral-100 bg-white p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <p className="text-sm font-semibold text-neutral-900">Choose a tutor</p>
+              <button
+                type="button"
+                onClick={() => setShowTutorModal(false)}
+                className="text-neutral-400 hover:text-neutral-700"
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {loadingPersonas ? (
+              <p className="py-8 text-center text-sm text-neutral-400">Loading tutors…</p>
+            ) : (
+              <ul className="space-y-2">
+                {personas.map((p) => {
+                  const isCurrent = p.name === meta.personaName;
+                  return (
+                    <li key={p.persona_id}>
+                      <button
+                        type="button"
+                        disabled={isCurrent}
+                        onClick={() => selectTutor(p)}
+                        className={`w-full rounded-xl border px-4 py-3 text-left transition-colors ${
+                          isCurrent
+                            ? 'border-neutral-900 bg-neutral-50 opacity-60 cursor-not-allowed'
+                            : 'border-neutral-200 hover:border-neutral-400 hover:bg-neutral-50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-xs font-bold text-white">
+                            {p.name.charAt(0)}
+                          </div>
+                          <div>
+                            <p className="text-sm font-semibold text-neutral-900">{p.name}</p>
+                            <p className="text-xs text-neutral-400">{p.role}</p>
+                          </div>
+                          {isCurrent && (
+                            <span className="ml-auto text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
+                              Current
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

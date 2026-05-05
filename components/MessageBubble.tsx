@@ -7,11 +7,22 @@ interface MessageBubbleProps {
   role: 'user' | 'assistant';
   content: string;
   streaming?: boolean;
+  isSystemNote?: boolean;
 }
 
-export function MessageBubble({ role, content, streaming = false }: MessageBubbleProps) {
+export function MessageBubble({ role, content, streaming = false, isSystemNote = false }: MessageBubbleProps) {
   const isUser = role === 'user';
   const [copied, setCopied] = useState(false);
+
+  if (isSystemNote) {
+    return (
+      <div className="flex items-center gap-3 py-1">
+        <div className="h-px flex-1 bg-neutral-100" />
+        <span className="text-[11px] font-medium text-neutral-400">{content}</span>
+        <div className="h-px flex-1 bg-neutral-100" />
+      </div>
+    );
+  }
 
   function handleCopy() {
     navigator.clipboard.writeText(content).then(() => {

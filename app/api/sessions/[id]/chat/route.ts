@@ -215,22 +215,31 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
                 // Sentinel parse failure is non-fatal; session can be ended via /end
               }
             } else {
-              // ── Advance phase based on conversation depth ─────────────────
-              // Count assistant messages already in DB (greet = seq 1, so subtract 1)
-              const prevAssistantCount = historyRows.filter((m) => m.role === 'assistant').length;
-              // prevAssistantCount already includes greet; this new message adds 1
-              const nonGreetAssistant = prevAssistantCount; // after insert
-              const nextPhase =
-                nonGreetAssistant <= 1 ? 'diagnostic'
-                : nonGreetAssistant <= 3 ? 'explain'
-                : nonGreetAssistant <= 5 ? 'check'
-                : nonGreetAssistant === 6 ? 'recap'
-                : 'practice';
-              if (nextPhase !== session.phase) {
-                await query(
-                  `UPDATE sessions SET phase = $1 WHERE session_id = $2 AND phase != 'ended'`,
-                  [nextPhase, sessionId],
-                );
+              // ── Advance phase only when LLM signals readiness ─────────────
+              // The LLM emits {"advance_phase":"<phase>"} on its own line when
+              // the current step's completion condition is met.
+              const advanceMatch = fullResponse.match(
+                /\{"advance_phase"\s*:\s*"(diagnostic|explain|check|recap|practice)"\}/,
+              );
+              if (advanceMatch) {
+                const requestedPhase = advanceMatch[1] as string;
+                // Only allow forward progression, never backward
+                const phaseOrder: Record<string, number> = {
+                  diagnostic: 0,
+                  explain: 1,
+                  check: 2,
+                  recap: 3,
+                  practice: 4,
+                  ended: 5,
+                };
+                const currentOrder = phaseOrder[session.phase] ?? 0;
+                const requestedOrder = phaseOrder[requestedPhase] ?? 0;
+                if (requestedOrder > currentOrder) {
+                  await query(
+                    `UPDATE sessions SET phase = $1 WHERE session_id = $2 AND phase != 'ended'`,
+                    [requestedPhase, sessionId],
+                  );
+                }
               }
             }
           } catch (dbErr) {
