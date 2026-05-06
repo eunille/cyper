@@ -103,3 +103,17 @@ CREATE TABLE audit_log (
   status_code SMALLINT     NOT NULL,
   created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+-- ─────────────────────────────────────────────
+-- 8. otp_codes  (email MFA codes)
+-- ─────────────────────────────────────────────
+CREATE TABLE otp_codes (
+  otp_id     UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    UUID         NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  code_hash  VARCHAR(255) NOT NULL,
+  expires_at TIMESTAMPTZ  NOT NULL,
+  used_at    TIMESTAMPTZ,
+  attempts   INTEGER      NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX otp_codes_user_id_idx ON otp_codes(user_id);

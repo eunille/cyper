@@ -18,4 +18,12 @@ To use the components in your app, import them as follows:
 
 ```tsx
 import { Button } from "@/components/ui/button";
+
+
 ```
+
+# 1. Start the database (only needs to be run once or after reboot)
+docker compose up -d postgres
+
+# 2. Start the dev server
+npm run dev

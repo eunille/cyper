@@ -100,8 +100,8 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
     }
 
     // ── Fetch message history ─────────────────────────────────────────────────
-    const historyRows = await query<DbMessage & { sequence: number }>(
-      `SELECT role, content, sequence FROM messages
+    const historyRows = await query<DbMessage & { sequence: number; phase_at_send: string }>(
+      `SELECT role, content, sequence, phase_at_send FROM messages
        WHERE session_id = $1 ORDER BY sequence ASC`,
       [sessionId],
     );
@@ -234,10 +234,56 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
                 };
                 const currentOrder = phaseOrder[session.phase] ?? 0;
                 const requestedOrder = phaseOrder[requestedPhase] ?? 0;
-                if (requestedOrder > currentOrder) {
+
+                // ── Server-side Socratic gate ─────────────────────────────────
+                // Block check→recap advance if the current user message looks like
+                // an MCQ wrong-answer response (pattern: single letter or "X: text").
+                // The LLM must re-confirm comprehension via the WHY PROBE first.
+                const isMcqAnswer = /^[A-D](?::\s*.+)?$/i.test(content.trim());
+                const isCheckToRecap =
+                  session.phase === 'check' && requestedPhase === 'recap';
+
+                // Determine if this MCQ answer was a wrong pick by checking
+                // whether the assistant response contains the distractor trap phrase.
+                const responseSuggestsWrong =
+                  fullResponse.toLowerCase().includes("that's a common trap") ||
+                  fullResponse.toLowerCase().includes("common misconception");
+
+                const blockAdvance = isCheckToRecap && isMcqAnswer && responseSuggestsWrong;
+
+                if (requestedOrder > currentOrder && !blockAdvance) {
                   await query(
                     `UPDATE sessions SET phase = $1 WHERE session_id = $2 AND phase != 'ended'`,
                     [requestedPhase, sessionId],
+                  );
+                }
+              } else if (session.phase === 'practice') {
+                // ── Practice phase auto-end fallback ──────────────────────────
+                // If the LLM responded in practice phase without emitting the
+                // score sentinel, check whether the student already answered the
+                // practice question at least once. If so, the session should have
+                // ended — auto-close it with a neutral score so it doesn't hang.
+                const practiceStudentMsgs = historyRows.filter(
+                  (m) => m.role === 'user' && m.phase_at_send === 'practice',
+                ).length;
+                if (practiceStudentMsgs >= 1) {
+                  const summary =
+                    'Session completed. The student demonstrated understanding through the full topic progression.';
+                  await query(
+                    `UPDATE sessions SET phase = 'ended', ended_at = NOW(), score = 75, summary = $1, gaps = $2
+                     WHERE session_id = $3 AND phase != 'ended'`,
+                    [summary, [], sessionId],
+                  );
+                  await query(
+                    `INSERT INTO user_progress (user_id, topic_id, attempts, best_score, last_score, mastered, last_studied)
+                     VALUES ($1, $2, 1, 75, 75, false, NOW())
+                     ON CONFLICT (user_id, topic_id) DO UPDATE SET
+                       attempts     = user_progress.attempts + 1,
+                       last_score   = 75,
+                       best_score   = GREATEST(user_progress.best_score, 75),
+                       mastered     = user_progress.mastered,
+                       last_studied = NOW()`,
+                    [userId, session.topic_id],
                   );
                 }
               }

@@ -1,16 +1,18 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { MessageBubble } from '@/components/MessageBubble';
 import { PhaseIndicator } from '@/components/PhaseIndicator';
 import { ChatInput } from '@/components/ChatInput';
+import { MCQCard } from '@/components/MCQCard';
+import { SessionExpiredModal } from '@/components/SessionExpiredModal';
 import { PageSpinner } from '@/components/ui/Spinner';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
 import { useSession } from '@/hooks/useSession';
 
 const READY_REPLIES = ["Yes, I'm ready!", "Let's go!", 'Tell me more first'] as const;
-const CHAT_REPLIES = ["I'm stuck", 'Explain more', 'Give me a hint'] as const;
+const CHAT_REPLIES = ["I'm not sure", 'Explain more', 'Show me options'] as const;
 
 interface Persona {
   persona_id: string;
@@ -22,8 +24,18 @@ interface Persona {
 export default function SessionPage() {
   const params = useParams<{ id: string }>();
   const sessionId = params.id;
-  const { meta, messages, sending, greeting, ending, changingTutor, greeted, error, handleSend, handleEndSession, handleChangeTutor, setError } = useSession(sessionId);
+  const router = useRouter();
+  const { meta, messages, sending, greeting, ending, changingTutor, greeted, sessionExpired, error, handleSend, handleEndSession, handleChangeTutor, handleMcqAnswer, setError } = useSession(sessionId);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // ignore — cookie gets cleared server-side
+    }
+    router.push('/auth');
+  }, [router]);
 
   const [showTutorModal, setShowTutorModal] = useState(false);
   const [personas, setPersonas] = useState<Persona[]>([]);
@@ -60,6 +72,8 @@ export default function SessionPage() {
 
   return (
     <div className="flex h-screen flex-col bg-white">
+      {/* Session expired modal — shown on any 401 response */}
+      {sessionExpired && <SessionExpiredModal onLogout={handleLogout} />}
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <header className="z-10 border-b border-neutral-100 bg-white px-4 py-3">
         <div className="mx-auto max-w-3xl">
@@ -138,13 +152,25 @@ export default function SessionPage() {
 
           <div className="space-y-6">
             {messages.map((m) => (
-              <MessageBubble
-                key={m.id}
-                role={m.role}
-                content={m.content}
-                streaming={m.streaming}
-                isSystemNote={m.id.startsWith('switch-')}
-              />
+              <div key={m.id}>
+                <MessageBubble
+                  role={m.role}
+                  content={m.content}
+                  streaming={m.streaming}
+                  isSystemNote={m.id.startsWith('switch-')}
+                />
+                {/* MCQ card — only shown on non-streaming assistant messages */}
+                {m.role === 'assistant' && m.mcq && !m.streaming && meta?.phase !== 'ended' && (
+                  <div className="ml-10 mt-2">
+                    <MCQCard
+                      messageId={m.id}
+                      mcq={m.mcq}
+                      answeredWith={m.mcqAnsweredWith}
+                      onAnswer={handleMcqAnswer}
+                    />
+                  </div>
+                )}
+              </div>
             ))}
           </div>
 

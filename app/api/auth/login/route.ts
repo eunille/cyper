@@ -2,12 +2,11 @@ import { type NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/server/db';
 import {
   verifyPassword,
-  signJwt,
-  buildSessionCookie,
-  jwtExpiresInSeconds,
 } from '@/lib/server/auth';
 import { logAudit } from '@/lib/server/audit';
 import { checkRateLimit, getClientIp } from '@/lib/server/rate-limit';
+import { createOtp, OTP_EXPIRY_MINUTES_EXPORT } from '@/lib/server/otp';
+import { sendOtpEmail } from '@/lib/server/mailer';
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let statusCode = 500;
@@ -43,10 +42,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const rows = await query<{
       user_id: string;
       username: string;
+      email: string;
       password_hash: string;
       is_active: boolean;
     }>(
-      `SELECT user_id, username, password_hash, is_active
+      `SELECT user_id, username, email, password_hash, is_active
        FROM users
        WHERE username = $1`,
       [username],
@@ -54,35 +54,35 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     const user = rows[0];
 
-    // Run bcrypt regardless of whether the user exists to prevent timing attacks.
-    // DUMMY_HASH is a valid bcrypt hash; using an invalid string would short-circuit
-    // compare() and leak username existence via timing.
+    // Constant-time comparison to prevent user enumeration via timing
     const DUMMY_HASH = '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5GyYzpCEJ9Gzi';
     const hashToVerify = user?.password_hash ?? DUMMY_HASH;
     const passwordValid = await verifyPassword(password, hashToVerify);
 
-    // Same generic error for "not found" and "wrong password" — no user enumeration
     if (!user || !passwordValid || !user.is_active) {
       statusCode = 401;
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
     }
 
-    // ── Issue JWT ─────────────────────────────────────────────────────────────
-    const token = await signJwt({ userId: user.user_id, username: user.username, isActive: true });
+    // ── Generate + send OTP (MFA step) ────────────────────────────────────────
     userId = user.user_id;
+    const code = await createOtp(user.user_id);
+    await sendOtpEmail(user.email, code, OTP_EXPIRY_MINUTES_EXPORT);
 
-    await query(`UPDATE users SET last_login = NOW() WHERE user_id = $1`, [user.user_id]);
-
-    const maxAge = jwtExpiresInSeconds();
-    const cookieHeader = buildSessionCookie(token, maxAge);
+    // Mask email for display: a***@domain.com
+    const [localPart, domain] = user.email.split('@');
+    const maskedEmail = `${localPart!.charAt(0)}***@${domain}`;
 
     statusCode = 200;
-    const response = NextResponse.json(
-      { userId: user.user_id, username: user.username },
+    return NextResponse.json(
+      {
+        status: 'otp_sent',
+        userId: user.user_id,
+        maskedEmail,
+        expiresMinutes: OTP_EXPIRY_MINUTES_EXPORT,
+      },
       { status: 200 },
     );
-    response.headers.set('Set-Cookie', cookieHeader);
-    return response;
   } catch (err) {
     console.error('[login]', err instanceof Error ? err.message : 'Unknown error');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
