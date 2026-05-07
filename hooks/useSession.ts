@@ -149,7 +149,7 @@ export function useSession(sessionId: string): UseSessionReturn {
           fetch(`/api/sessions/${sessionId}/messages`),
         ]);
         if (metaRes.status === 401) { handle401(); return; }
-        if (metaRes.status === 401) { handle401(); return; }
+        if (msgsRes.status === 401) { handle401(); return; }
         if (!metaRes.ok) { router.push('/learn'); return; }
         const raw = await metaRes.json() as {
           session_id: string; persona_name: string; topic_name: string; phase: Phase;
@@ -167,7 +167,12 @@ export function useSession(sessionId: string): UseSessionReturn {
           }>;
           if (!cancelled) {
             if (history.length > 0) {
-              setMessages(history.map((m) => ({ id: m.message_id, role: m.role, content: m.content })));
+              setMessages(history.map((m) => ({
+                id: m.message_id,
+                role: m.role,
+                content: m.role === 'assistant' ? stripSentinels(m.content) : m.content,
+                mcq: m.role === 'assistant' ? extractMcq(m.content) : undefined,
+              })));
               setGreeted(true);
             }
           }
@@ -222,7 +227,7 @@ export function useSession(sessionId: string): UseSessionReturn {
 
   // ── Send message ──────────────────────────────────────────────────────────
   const handleSend = useCallback(async (content: string) => {
-    if (sending) return;
+    if (sending || meta?.phase === 'ended') return;
     const userMsgId = crypto.randomUUID();
     setMessages((prev) => [...prev, { id: userMsgId, role: 'user', content }]);
     setSending(true);
@@ -285,7 +290,7 @@ export function useSession(sessionId: string): UseSessionReturn {
     } finally {
       setSending(false);
     }
-  }, [sending, sessionId, handle401]);
+  }, [sending, meta?.phase, sessionId, handle401]);
 
   // ── Change tutor mid-session ─────────────────────────────────────────────
   const handleChangeTutor = useCallback(async (personaId: string) => {
@@ -329,19 +334,21 @@ export function useSession(sessionId: string): UseSessionReturn {
       } else {
         const reader = handoffRes.body.getReader();
         const decoder = new TextDecoder();
+        let rawHandoff = '';
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          rawHandoff += decoder.decode(value, { stream: true });
           setMessages((prev) =>
             prev.map((m) =>
               m.id === asstMsgId
-                ? { ...m, content: m.content + decoder.decode(value, { stream: true }) }
+                ? { ...m, content: stripSentinels(rawHandoff) }
                 : m,
             ),
           );
         }
         setMessages((prev) =>
-          prev.map((m) => (m.id === asstMsgId ? { ...m, streaming: false } : m)),
+          prev.map((m) => (m.id === asstMsgId ? { ...m, streaming: false, content: stripSentinels(rawHandoff) } : m)),
         );
       }
     } catch (err) {

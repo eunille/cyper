@@ -34,7 +34,10 @@ Every reply: max 3 sentences. One idea per message. No preamble, no restating wh
 ── SESSION FLOW (follow this order, one step at a time) ──
 
 STEP 1 — DIAGNOSE: Ask ONE question to gauge prior knowledge. Do not teach yet.
-  → After any student attempt (even vague), emit {"advance_phase":"explain"} then calibrate depth.
+  → Emit {"advance_phase":"explain"} ONLY after the student gives a substantive answer that reveals
+    their knowledge level (correct, partial, or a genuine attempt to explain).
+  → Do NOT advance on greetings, "yes", "ready", "let's go", or single-word acknowledgements.
+  → Do NOT advance on "I don't know" — instead, note their level is beginner and THEN emit advance.
 
 STEP 2 — EXPLAIN: Teach ONE concept. End with exactly one check question.
   → After the teach + check question, emit {"advance_phase":"check"}.
@@ -120,7 +123,7 @@ Encouraging. Never condescending. Never say "Great question!" as filler.
 `.trim();
 
 // ── Builders ──────────────────────────────────────────────────────────────────
-export function buildSystemPrompt(persona: Persona, topic: Topic): string {
+export function buildSystemPrompt(persona: Persona, topic: Topic, currentPhase?: string): string {
   const part1 = persona.systemPromptTemplate
     .replace('{specialization}', persona.specialization)
     .replace('{topic}', topic.name);
@@ -131,16 +134,32 @@ Learning objective: ${topic.learningObjective}.
 Assume the student has ${topic.difficulty} prior knowledge of this subject.
 `.trim();
 
-  return [part1, part2, SCENARIO_C_RULES].join('\n\n');
+  const phaseAnchor = currentPhase
+    ? `\n\n━━ CURRENT SESSION STATE ━━\nYou are currently in the **${currentPhase.toUpperCase()}** phase. Only emit {"advance_phase":"<next>"} for the phase that comes IMMEDIATELY after ${currentPhase.toUpperCase()}. Do NOT emit advance_phase for any other phase. Do NOT re-emit advance_phase for a phase that has already passed.`
+    : '';
+
+  return [part1, part2, SCENARIO_C_RULES + phaseAnchor].join('\n\n');
 }
 
-export function buildMessageHistory(messages: DbMessage[]): LLMMessage[] {
-  return messages.map((m) => ({
-    role: m.role,
-    // Strip sentinel JSON from assistant history so the LLM doesn't re-read
-    // its own phase signals and misinterpret where the session stands.
-    content: m.role === 'assistant' ? stripSentinelsFromHistory(m.content) : m.content,
-  }));
+export function buildMessageHistory(messages: (DbMessage & { phase_at_send?: string })[]): LLMMessage[] {
+  const result: LLMMessage[] = [];
+  let lastPhase: string | undefined;
+
+  for (const m of messages) {
+    if (m.phase_at_send && m.phase_at_send !== lastPhase) {
+      result.push({
+        role: 'system',
+        content: `[Phase is now: ${m.phase_at_send.toUpperCase()}]`,
+      });
+      lastPhase = m.phase_at_send;
+    }
+    result.push({
+      role: m.role,
+      content: m.role === 'assistant' ? stripSentinelsFromHistory(m.content) : m.content,
+    });
+  }
+
+  return result;
 }
 
 // Removes all {"advance_phase":...}, {"mcq":{...}}, and {"score":...} blocks

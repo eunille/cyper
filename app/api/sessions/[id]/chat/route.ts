@@ -141,6 +141,7 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
         difficulty: topic.difficulty as 'beginner' | 'intermediate' | 'advanced',
         learningObjective: topic.learning_objective,
       },
+      session.phase,
     );
 
     const ollamaMessages = [
@@ -179,7 +180,7 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
 
             // Check for session-end sentinel
             const sentinelMatch = fullResponse.match(
-              /\{"score":\s*\d+,\s*"summary":\s*"[^"]*"[^}]*\}/,
+              /\{"score":\s*\d+,\s*"summary":\s*"(?:[^"\\]|\\.)*"[^}]*\}/,
             );
             if (sentinelMatch) {
               try {
@@ -216,14 +217,11 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
               }
             } else {
               // ── Advance phase only when LLM signals readiness ─────────────
-              // The LLM emits {"advance_phase":"<phase>"} on its own line when
-              // the current step's completion condition is met.
               const advanceMatch = fullResponse.match(
                 /\{"advance_phase"\s*:\s*"(diagnostic|explain|check|recap|practice)"\}/,
               );
               if (advanceMatch) {
                 const requestedPhase = advanceMatch[1] as string;
-                // Only allow forward progression, never backward
                 const phaseOrder: Record<string, number> = {
                   diagnostic: 0,
                   explain: 1,
@@ -232,32 +230,53 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
                   practice: 4,
                   ended: 5,
                 };
-                const currentOrder = phaseOrder[session.phase] ?? 0;
+
+                // Re-read the CURRENT phase from DB to avoid stale-read races
+                const freshRows = await query<{ phase: string }>(
+                  `SELECT phase FROM sessions WHERE session_id = $1`,
+                  [sessionId],
+                );
+                const freshPhase = freshRows[0]?.phase ?? session.phase;
+                const currentOrder = phaseOrder[freshPhase] ?? 0;
                 const requestedOrder = phaseOrder[requestedPhase] ?? 0;
 
+                // Only allow the NEXT sequential phase — no skipping
+                const isSequential = requestedOrder === currentOrder + 1;
+
                 // ── Server-side Socratic gate ─────────────────────────────────
-                // Block check→recap advance if the current user message looks like
-                // an MCQ wrong-answer response (pattern: single letter or "X: text").
-                // The LLM must re-confirm comprehension via the WHY PROBE first.
                 const isMcqAnswer = /^[A-D](?::\s*.+)?$/i.test(content.trim());
                 const isCheckToRecap =
-                  session.phase === 'check' && requestedPhase === 'recap';
+                  freshPhase === 'check' && requestedPhase === 'recap';
 
-                // Determine if this MCQ answer was a wrong pick by checking
-                // whether the assistant response contains the distractor trap phrase.
                 const responseSuggestsWrong =
                   fullResponse.toLowerCase().includes("that's a common trap") ||
                   fullResponse.toLowerCase().includes("common misconception");
 
                 const blockAdvance = isCheckToRecap && isMcqAnswer && responseSuggestsWrong;
 
-                if (requestedOrder > currentOrder && !blockAdvance) {
+                // ── Block diagnostic→explain on non-answers ──────────────────
+                const isDiagToExplain =
+                  freshPhase === 'diagnostic' && requestedPhase === 'explain';
+                const NON_ANSWERS = /^(yes|no|ok|okay|sure|ready|let'?s go|i'?m ready|hi|hello|hey|cool|yep|yeah|yea|nah|idk|yes i'?m ready|tell me more first|let'?s go!?|show me|go ahead|start|begin)[\s!.?]*$/i;
+                const blockDiagNonAnswer = isDiagToExplain && (
+                  NON_ANSWERS.test(content.trim()) ||
+                  content.trim().split(/\s+/).length <= 3
+                );
+
+                if (isSequential && !blockAdvance && !blockDiagNonAnswer) {
                   await query(
-                    `UPDATE sessions SET phase = $1 WHERE session_id = $2 AND phase != 'ended'`,
-                    [requestedPhase, sessionId],
+                    `UPDATE sessions SET phase = $1 WHERE session_id = $2 AND phase = $3`,
+                    [requestedPhase, sessionId, freshPhase],
                   );
                 }
-              } else if (session.phase === 'practice') {
+              } else {
+                // Re-read phase for practice auto-end check
+                const practiceCheckRows = await query<{ phase: string }>(
+                  `SELECT phase FROM sessions WHERE session_id = $1`,
+                  [sessionId],
+                );
+                const currentPhaseNow = practiceCheckRows[0]?.phase ?? session.phase;
+                if (currentPhaseNow === 'practice') {
                 // ── Practice phase auto-end fallback ──────────────────────────
                 // If the LLM responded in practice phase without emitting the
                 // score sentinel, check whether the student already answered the
@@ -285,6 +304,7 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
                        last_studied = NOW()`,
                     [userId, session.topic_id],
                   );
+                }
                 }
               }
             }

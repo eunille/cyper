@@ -57,16 +57,32 @@ export async function PATCH(request: NextRequest, { params }: RouteParams): Prom
       // Body is optional — ignore parse errors
     }
 
-    const rows = await query<{ session_id: string; phase: string; ended_at: string; score: number | null; summary: string | null }>(
+    const rows = await query<{ session_id: string; phase: string; ended_at: string; score: number | null; summary: string | null; topic_id: string }>(
       `UPDATE sessions
        SET phase = 'ended', ended_at = NOW(), score = COALESCE($1, score), summary = COALESCE($2, summary)
        WHERE session_id = $3
-       RETURNING session_id, phase, ended_at, score, summary`,
+       RETURNING session_id, phase, ended_at, score, summary, topic_id`,
       [score, summary, sessionId],
     );
 
+    const ended = rows[0];
+    if (ended) {
+      const finalScore = ended.score ?? 0;
+      await query(
+        `INSERT INTO user_progress (user_id, topic_id, attempts, best_score, last_score, mastered, last_studied)
+         VALUES ($1, $2, 1, $3, $3, $4, NOW())
+         ON CONFLICT (user_id, topic_id) DO UPDATE SET
+           attempts     = user_progress.attempts + 1,
+           last_score   = EXCLUDED.last_score,
+           best_score   = GREATEST(user_progress.best_score, EXCLUDED.best_score),
+           mastered     = EXCLUDED.best_score >= 80 OR user_progress.mastered,
+           last_studied = NOW()`,
+        [userId, ended.topic_id, finalScore, finalScore >= 80],
+      );
+    }
+
     statusCode = 200;
-    return NextResponse.json(rows[0], { status: 200 });
+    return NextResponse.json(ended, { status: 200 });
   } catch (err) {
     console.error('[PATCH /api/sessions/[id]/end]', err instanceof Error ? err.message : 'Unknown error');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
